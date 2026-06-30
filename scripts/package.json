@@ -1,0 +1,8 @@
+{
+  "name": "deadline-notifier",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}

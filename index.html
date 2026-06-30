@@ -140,6 +140,11 @@ button{
   border-color: rgba(92,122,82,0.5);
   background: rgba(92,122,82,0.12);
 }
+#syncBtn.error{
+  color: var(--late-red);
+  border-color: rgba(178,58,46,0.5);
+  background: rgba(178,58,46,0.12);
+}
 #syncBtn:active{ opacity:0.8; }
 
 /* ---------- BOARD ---------- */
@@ -415,21 +420,35 @@ function save(){
 /* ---------- SYNCHRONISATION FIREBASE ---------- */
 const syncBtn = document.getElementById('syncBtn');
 
+let syncStatus = 'offline'; // 'offline' | 'connecting' | 'connected' | 'error'
+let syncErrorMessage = '';
+
 function updateSyncLabel(){
+  syncBtn.classList.remove('connected','error');
   if(!syncEnabled){
     syncBtn.textContent = '☁ Hors-ligne';
-    syncBtn.classList.remove('connected');
     syncBtn.title = "Synchronisation non configurée (configuration Firebase manquante)";
     return;
   }
-  if(spaceCode){
+  if(!spaceCode){
+    syncBtn.textContent = '☁ Connecter';
+    syncBtn.title = "Touche pour relier cet appareil à un espace partagé";
+    return;
+  }
+  if(syncStatus === 'connecting'){
+    syncBtn.textContent = '☁ ' + spaceCode + '…';
+    syncBtn.title = "Connexion à l'espace « " + spaceCode + " » en cours…";
+  } else if(syncStatus === 'connected'){
     syncBtn.textContent = '☁ ' + spaceCode;
     syncBtn.classList.add('connected');
     syncBtn.title = "Synchronisé avec l'espace « " + spaceCode + " ». Touche pour changer.";
+  } else if(syncStatus === 'error'){
+    syncBtn.textContent = '⚠ Erreur sync';
+    syncBtn.classList.add('error');
+    syncBtn.title = "Échec de synchronisation sur « " + spaceCode + " » : " + syncErrorMessage + ". Vérifie les règles Firestore. Touche pour réessayer.";
   } else {
-    syncBtn.textContent = '☁ Connecter';
-    syncBtn.classList.remove('connected');
-    syncBtn.title = "Touche pour relier cet appareil à un espace partagé";
+    syncBtn.textContent = '☁ ' + spaceCode;
+    syncBtn.title = "Touche pour relier/reconnecter cet appareil";
   }
 }
 
@@ -532,6 +551,7 @@ function connectSpace(code){
   spaceCode = code.trim();
   localStorage.setItem('fiches_space_code', spaceCode);
   firstSnapshotProcessed = false;
+  syncStatus = 'connecting';
   updateSyncLabel();
   if(unsubscribeSpace){ unsubscribeSpace(); unsubscribeSpace = null; }
   if(!spaceCode || !syncEnabled) return;
@@ -539,6 +559,7 @@ function connectSpace(code){
   unsubscribeSpace = _fsOnSnapshot(
     _fsCollection(db, 'spaces', spaceCode, 'cards'),
     (snapshot)=>{
+      syncStatus = 'connected';
       snapshot.docChanges().forEach(change=>{
         if(change.type === 'removed') applyRemoteRemoval(change.doc.id);
         else applyRemoteCard(change.doc.id, change.doc.data());
@@ -552,8 +573,14 @@ function connectSpace(code){
       rerenderAllBodies();
       updateCountAndFilter();
       save();
+      updateSyncLabel();
     },
-    (err)=>{ console.warn('sync error', err); }
+    (err)=>{
+      console.warn('sync error', err);
+      syncStatus = 'error';
+      syncErrorMessage = (err && err.code) ? err.code : 'erreur inconnue';
+      updateSyncLabel();
+    }
   );
 }
 

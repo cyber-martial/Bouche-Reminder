@@ -146,6 +146,37 @@ button{
   background: rgba(178,58,46,0.12);
 }
 #syncBtn:active{ opacity:0.8; }
+#syncDisconnectBtn{
+  display:none;
+  background: rgba(178,58,46,0.10);
+  border: 1px solid rgba(178,58,46,0.35);
+  color: var(--late-red);
+  font-size:12px;
+  font-weight:600;
+  width:30px;
+  height:30px;
+  align-items:center;
+  justify-content:center;
+  border-radius: var(--radius);
+}
+#syncDisconnectBtn.visible{ display:inline-flex; }
+#syncDisconnectBtn:active{ background: rgba(178,58,46,0.22); }
+#notifBtn{
+  background: rgba(58,58,58,0.05);
+  border: 1px solid rgba(58,58,58,0.16);
+  color: var(--ink-fade);
+  font-size:11.5px;
+  font-weight:500;
+  padding:8px 11px;
+  border-radius: var(--radius);
+  white-space:nowrap;
+}
+#notifBtn.on{
+  color: var(--ok-green);
+  border-color: rgba(92,122,82,0.5);
+  background: rgba(92,122,82,0.12);
+}
+#notifBtn:active{ opacity:0.8; }
 
 /* ---------- BOARD ---------- */
 #board-wrap{
@@ -342,6 +373,8 @@ button{
   </select>
   <button id="newBtn">+ Nouvelle fiche</button>
   <button id="syncBtn" title="Synchronisation entre appareils">☁ Hors-ligne</button>
+  <button id="syncDisconnectBtn" title="Déconnecter cet appareil de l'espace partagé">✕</button>
+  <button id="notifBtn" title="Rappel quotidien des deadlines à 18h">🔔 Rappels</button>
 </div>
 
 <div id="board-wrap">
@@ -419,12 +452,15 @@ function save(){
 
 /* ---------- SYNCHRONISATION FIREBASE ---------- */
 const syncBtn = document.getElementById('syncBtn');
+const syncDisconnectBtn = document.getElementById('syncDisconnectBtn');
 
 let syncStatus = 'offline'; // 'offline' | 'connecting' | 'connected' | 'error'
 let syncErrorMessage = '';
 
 function updateSyncLabel(){
   syncBtn.classList.remove('connected','error');
+  syncDisconnectBtn.classList.toggle('visible', syncEnabled && !!spaceCode);
+  if(typeof updateNotifLabel === 'function') updateNotifLabel();
   if(!syncEnabled){
     syncBtn.textContent = '☁ Hors-ligne';
     syncBtn.title = "Synchronisation non configurée (configuration Firebase manquante)";
@@ -594,6 +630,123 @@ syncBtn.addEventListener('click', ()=>{
     connectSpace(code);
   }
 });
+
+function disconnectSpace(){
+  if(unsubscribeSpace){ unsubscribeSpace(); unsubscribeSpace = null; }
+  spaceCode = '';
+  localStorage.removeItem('fiches_space_code');
+  syncStatus = 'offline';
+  firstSnapshotProcessed = false;
+  updateSyncLabel();
+}
+
+syncDisconnectBtn.addEventListener('click', ()=>{
+  if(!spaceCode) return;
+  if(confirm("Déconnecter cet appareil de l'espace « " + spaceCode + " » ? Les fiches déjà présentes restent sur cet appareil, mais ne se synchroniseront plus tant que tu ne te reconnectes pas.")){
+    disconnectSpace();
+  }
+});
+
+/* ---------- RAPPELS QUOTIDIENS (notifications push à 18h) ---------- */
+// Clé publique VAPID — non sensible, peut rester en clair dans le code.
+const VAPID_PUBLIC_KEY = "BOLXIs-QIwq2FutH1U8_Bo9YaPCLP3pLrPIQavNlbu2YtVpWgHkKN_EZGnOkJKHzD4bvvbhbKOwWUPqmyYPFIGk";
+
+const notifBtn = document.getElementById('notifBtn');
+let notifSubId = localStorage.getItem('fiches_notif_sub_id') || null;
+
+function urlBase64ToUint8Array(base64String){
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
+function updateNotifLabel(){
+  const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  if(!supported){
+    notifBtn.textContent = '🔔 Indisponible';
+    notifBtn.classList.remove('on');
+    notifBtn.title = "Les notifications ne sont pas supportées par ce navigateur. Sur iPhone/iPad : installe l'app via « Partager → Sur l'écran d'accueil » puis réessaie depuis l'icône (Safari seul ne le permet pas).";
+    notifBtn.disabled = true;
+    return;
+  }
+  if(!syncEnabled || !spaceCode){
+    notifBtn.textContent = '🔔 Rappels';
+    notifBtn.classList.remove('on');
+    notifBtn.title = "Connecte d'abord un espace partagé (☁) pour activer les rappels.";
+    return;
+  }
+  if(notifSubId){
+    notifBtn.textContent = '🔔 Rappels actifs';
+    notifBtn.classList.add('on');
+    notifBtn.title = "Rappel quotidien à 18h des fiches dont la deadline est le lendemain. Touche pour désactiver.";
+  } else {
+    notifBtn.textContent = '🔔 Activer rappels';
+    notifBtn.classList.remove('on');
+    notifBtn.title = "Touche pour recevoir chaque jour à 18h un rappel des fiches dont la deadline est le lendemain.";
+  }
+}
+
+async function enableNotifications(){
+  if(!syncEnabled || !spaceCode){
+    alert("Connecte d'abord un espace partagé (bouton ☁) avant d'activer les rappels.");
+    return;
+  }
+  try{
+    const permission = await Notification.requestPermission();
+    if(permission !== 'granted'){
+      alert("Permission refusée — active les notifications pour cette app dans les réglages de ton appareil si tu changes d'avis.");
+      return;
+    }
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub){
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+      });
+    }
+    const subId = notifSubId || uid();
+    await _fsSetDoc(_fsDoc(db, 'spaces', spaceCode, 'subscriptions', subId), {
+      subscription: sub.toJSON(),
+      created: new Date().toISOString()
+    });
+    notifSubId = subId;
+    localStorage.setItem('fiches_notif_sub_id', subId);
+    updateNotifLabel();
+    alert("Rappels activés ✓ Tu recevras chaque jour vers 18h la liste des fiches dont la deadline est le lendemain (si l'espace « " + spaceCode + " » en contient).");
+  }catch(e){
+    console.warn('notif subscribe failed', e);
+    alert("Impossible d'activer les rappels sur cet appareil/navigateur. " + (e && e.message ? e.message : ''));
+  }
+}
+
+async function disableNotifications(){
+  try{
+    if(syncEnabled && spaceCode && notifSubId){
+      await _fsDeleteDoc(_fsDoc(db, 'spaces', spaceCode, 'subscriptions', notifSubId)).catch(()=>{});
+    }
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if(sub) await sub.unsubscribe();
+  }catch(e){ console.warn('notif unsubscribe failed', e); }
+  notifSubId = null;
+  localStorage.removeItem('fiches_notif_sub_id');
+  updateNotifLabel();
+}
+
+notifBtn.addEventListener('click', ()=>{
+  if(notifBtn.disabled) return;
+  if(notifSubId){
+    if(confirm("Désactiver les rappels quotidiens sur cet appareil ?")) disableNotifications();
+  } else {
+    enableNotifications();
+  }
+});
+
+updateNotifLabel();
 function uid(){ return 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
 function escapeHtml(s){
